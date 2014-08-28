@@ -1,0 +1,281 @@
+\newcommand{\pageinfo}{\texttt{page\_info}\xspace}
+\newcommand{\countinfo}{\texttt{count\_info}\xspace}
+\newcommand{\ulong}{\texttt{unsigned long}\xspace}
+\newcommand{\mfn}{\texttt{mfn_t}\xspace}
+
+\paragraph{}
+The \pageinfo structure is the place to find an information about
+a machine page frame.
+For instance, this is where Xen stores the count of pointer on the page frame
+to avoid uncontrolled deallocation.
+You can access the \pageinfo of a given page frame address (\ulong) with the
+macro \texttt{mfn\_to\_page()} which takes the page frame address as an
+argument and brings you back a pointer on the good \pageinfo.
+Of course, you can do the reverse operation with the macro
+\texttt{page\_to\_mfn()}.
+
+\paragraph{}
+You can find the definition of the \pageinfo structure in the header file
+\texttt{xen/include/asm-x86/mm.h}.
+Because there can be a lot of page frames in a machine and so a lot of
+\pageinfo, which have to always remain in memory, the size of this structure
+does matter.
+That is why, the bits in this structure are carefully used and have different
+significations depending on how the page frame is used.
+
+\paragraph{}
+The first field is a double word indicating how the page frame is linked to
+the other ones.
+For most cases, the field to use is \texttt{list} which is the two
+``short pointers'' on the previous and on the next \pageinfo into a doubly
+linked list.
+It can be the free list the page frame belong to, or any page list of a
+domain\footnote{not exhaustive}.
+The other fields \texttt{up} and \texttt{sharing} are either for shadow paging,
+which is not used anymore, and page sharing, which is a corner case.
+
+\paragraph{}
+The next field \countinfo is a double word reference counter.
+The principle is as usual, each \pageinfo tracks the count of pointer on the
+corresponding page frame.
+When trying to deallocate a page frame, the reference count is checked, and if
+it is not 0, it should not be considered as free.
+Now because it is very unlike this counter reach big values, the highter bits
+of this counter are used to store other informations.
+These informations are described in figure \ref{figure page_info.count_info}
+and in table \ref{table page_info.count_info}.
+This description stands for a \emph{x86\_64} architecture.
+To be portable, you should use the macros listed in
+\texttt{xen/include/asm-x86/mm.h} and starting with \texttt{PGC\_}.
+
+\begin{figure}
+  \centering
+  \newcommand{\bit}[1]{\multicolumn{1}{r}{\scriptsize#1}}
+  \newcommand{\field}[1]{\vspace{1pt}\scriptsize#1}
+  \begin{tabularx}{\textwidth}
+    { | >{\centering}p{10pt}
+      | >{\centering}p{10pt}
+      | >{\centering}p{10pt}
+      | >{\centering}p{10pt}
+      | >{\centering}p{10pt}
+      | >{\centering}p{10pt}
+      | >{\centering}p{10pt}
+      | >{\centering}p{30pt}
+      | >{\centering\arraybackslash}X | }
+    \bit{63} & \bit{62} & \bit{61} & \bit{60} & \bit{59} & \bit{58} &
+    \bit{57} & \bit{55} & \bit{0} \\
+    \hline
+    \field{AL} & \field{XH} & \field{PT} & \field{PA} & \field{PC} &
+    \field{PW} & \field{BR} & \field{ST} & \field{CNT}\vspace{8pt} \\
+    \hline
+  \end{tabularx}
+  \caption{\label{figure page_info.count_info}Definition of
+    \texttt{page\_info.count\_info}}
+\end{figure}
+
+\begin{table}
+  \centering
+  \begin{tabularx}{\textwidth}{ | l | X | }
+    \hline
+    field   & description \\
+    \hline
+    AL      & Allocated bit. If this is set, then the corresponding page frame
+              is already allocated to a domain. Obtained with
+              \texttt{PGC\_allocated}. \\
+    \hline
+    XH      & Xen heap bit. If this is set, then the corresponding page frame
+              is belonging to the xen heap of the owning domain, meaning it
+              can be used for hypervisor operations but not from inside the
+              VM\footnote{not sure yet}. Obtained with
+              \texttt{PGC\_xen\_heap}. \\
+    \hline
+    PT      & Page table bit. If this is set, then the corresponding page frame
+              is used as the page frame of the owning domain, and so it cannot
+              be used from inside the VM. Obtained with
+              \texttt{PGC\_page\_table}. \\
+    \hline
+    PA      & Page attribute table bit. Indicate the state of PAT use for the
+              corresponding page frame. Obtained with
+              \texttt{PGC\_cacheattr\_mask} and
+              \texttt{PGC\_cacheattr\_base}. \\
+    \hline
+    PC      & Page cache disable bit. Indicate the state of PCD use for the
+              corresponding page frame. Obtained with
+              \texttt{PGC\_cacheattr\_mask} and
+              \texttt{PGC\_cacheattr\_base}. \\
+    \hline
+    PW      & Page write throught bit. Indicate the state of the PWT use for
+              the corresponding page frame. Obtained with
+              \texttt{PGC\_cacheattr\_mask} and
+              \texttt{PGC\_cacheattr\_base}. \\
+    \hline
+    BR      & Page broken bit. If this is set, then the page cannot be used
+              anymore. Typically, it cannot be returned by a Xen allocation
+              function. Obtained with \texttt{PGC\_broken}. \\
+    \hline
+    ST      & The state of the page. These two bits indicate the state of the
+              page frame which can be \texttt{inuse}, \texttt{offlining},
+              \texttt{offlined} or \texttt{free}. Obtained with
+              \texttt{page\_state\_is()}. \\
+    \hline
+    CNT     & The reference counter of the page frame. These 55 bits indicate
+              how many entities have a reference on the page frame. When the
+              count falls to 0, the page can be freed. Obtained with
+              \texttt{PGC\_count\_mask}. \\
+    \hline
+  \end{tabularx}
+  \caption{\label{table page_info.count_info}Definition of
+    \texttt{page\_info.count\_info} fields}
+\end{table}
+
+\paragraph{}
+The next field is a double word with a meaning depending on the value of
+\countinfo.
+If this last is 0, then the related page frame is used as a shadow.
+Because it is a corner case, we leave this value.
+If \texttt{count\_info \& PGC\_count\_mask} (the mask for the \texttt{counter}
+field of \countinfo) is 0, then the page is not used and is in a free list, and
+the first 8-bit character of this field is a boolean which is set, means the
+TLB has to be flushed before the next use of the page frame
+(\texttt{page\_info.u.free.need\_tlbflush}).
+If \texttt{count\_info \& PGC\_count\_mask} is not 0, then the page is in use,
+and this field is another reference counter
+(\texttt{page\_info.u.inuse.type\_info}).
+
+\paragraph{}
+This counter is another regular reference counter, but instead indicating the
+count of entities which have references to the page frame, it indicates the
+count of entities using the page frame with a specific meaning.
+For instance, a page frame can be used as a part of a page frame, or as a page
+writable by the guest.
+This count is keeped to ensure a page cannot change its type while being used.
+Once again, because this counter will not reach hight values, the hightest bits
+of this counter are used to store valuable informations.
+These informations are described in figure \ref{figure page_info.type_info}
+and in table \ref{table page_info.type_info}.
+This description stands for a \emph{x86\_64} architecture.
+To be portable, you should use the macros listed in
+\texttt{xen/include/asm-x86/mm.h} and starting with \texttt{PGT\_}.
+
+\begin{figure}
+  \centering
+  \newcommand{\bit}[1]{\multicolumn{1}{r}{\scriptsize#1}}
+  \newcommand{\field}[1]{\vspace{1pt}\scriptsize#1}
+  \begin{tabularx}{\textwidth}
+    { | >{\centering}p{76pt}
+      | >{\centering}p{10pt}
+      | >{\centering}p{10pt}
+      | >{\centering}p{10pt}
+      | >{\centering}p{10pt}
+      | >{\centering}p{10pt}
+      | >{\centering\arraybackslash}X | }
+    \bit{60} & \bit{59} & \bit{58} & \bit{57} & \bit{56} & \bit{55} &
+    \bit{0} \\
+    \hline
+    \field{TYPE} & \field{PI} & \field{VA} & \field{AE} & \field{PA} &
+    \field{LK} & \field{CNT}\vspace{8pt} \\
+    \hline
+  \end{tabularx}
+  \caption{\label{figure page_info.type_info}Definition of
+    \texttt{page\_info.u.inuse.type\_info}}
+\end{figure}
+
+\begin{table}
+  \centering
+  \begin{tabularx}{\textwidth}{ | l | X | }
+    \hline
+    field   & description \\
+    \hline
+    TYPE    & The type of the page. The possible types are listed in
+              \ref{table page_info.type_info list}.
+              Obtained with \texttt{PGT\_type\_mask}. \\
+    \hline
+    PI      & Page pinned bit. If this is set, then the owning domain has
+              pinned the corresponding page frame to its current type.
+              Obtained with \texttt{PGT\_pinned}. \\
+    \hline
+    VA      & Page validated bit. If this is set, then the corresponding
+              page frame has been validated to be of its current type.
+              Obtained with \texttt{PGT\_validated}. \\
+    \hline
+    AE      & PAE xen private bit. If this is set, then the corresponding
+              page is a L2 page (second level of page table) and contains
+              mapping the guest cannot use. This can be used in PAE only.
+              Obtained with \texttt{PGT\_pae\_xen\_l2}. \\
+    \hline
+    PA      & Partial validated bit. If this is set, then the corresponding
+              page frame has been partially validated to be of its current
+              type. Obtained with \texttt{PGT\_partial}. \\
+    \hline
+    LK      & Locked page bit. If this is set, then the corresponding page
+              frame is locked. Obtained with \texttt{PGT\_locked}. \\
+    \hline
+    CNT     & The reference counter of the page frame. These 55 bits indicate
+              how many entities have a reference on the page frame as a typed
+              page frame. When the count falls to 0, the page can change its
+              type. Obtained with \texttt{PGT\_count\_mask}. \\
+    \hline
+  \end{tabularx}
+  \caption{\label{table page_info.type_info}Definition of
+    \texttt{page\_info.u.type\_info} fields}
+\end{table}
+
+\begin{table}
+  \centering
+  \begin{tabularx}{\textwidth}{ | l | X | }
+    \hline
+    type                          & description \\
+    \hline
+    \texttt{PGT\_none}            & This page has no type. \\
+    \hline
+    \texttt{PGT\_l1\_page\_table} & This page is used as a first level page
+                                    in the page table of the guest. \\
+    \hline
+    \texttt{PGT\_l2\_page\_table} & This page is used as a second level page
+                                    in the page table of the guest. \\
+    \hline
+    \texttt{PGT\_l3\_page\_table} & This page is used as a third level page
+                                    in the page table of the guest. \\
+    \hline
+    \texttt{PGT\_l4\_page\_table} & This page is used as a fourth level page
+                                    in the page table of the guest. \\
+    \hline
+    \texttt{PGT\_seg\_desc\_page} & This page is used a the \texttt{GDT} or
+                                    \texttt{LDT} of the guest. \\
+    \hline
+    \texttt{PGT\_writable\_page}  & This page is used directly by the guest,
+                                    and is writable from inside of it. \\
+    \hline
+    \texttt{PGT\_shared\_page}    & This page is a shared copy-on-write
+                                    page. \\
+    \hline
+  \end{tabularx}
+  \caption{\label{table page_info.type_info list}Definition of
+    \texttt{page\_info.u.type\_info} types}
+\end{table}
+
+\paragraph{}
+The next field is a single word with a meaning depending on the value of
+\countinfo.
+Again, because the shadow paging is a corner case, we will not describe it
+here.
+If the page is in a free list, the field indicates the order of the page:
+the consecutive pages which are in a free list are packed together to form
+power of two sized page frames (\texttt{page\_info.v.free.order}).
+At allocation time, their can be taken as a big page frame, or be splitted to
+be used separatedely.
+The value 0 of this field means a 4 Kilobytes page frame, then it increases in
+power of two.
+If the page is in use, the field indicates what domain is owning the page
+(\texttt{page\_info.v.inuse.\_domain}).
+This field should not be used directly, instead, user should apply the macro
+\texttt{page\_get\_owner()} of \texttt{page\_set\_owner()} on the \pageinfo.
+
+\paragraph{}
+The last field is a single word with a meaning depending on several other
+fields.
+If the page is free or typeless, then it is a timestamp for the last TLB flush
+of this page frame (\texttt{page\_info.tlbflush\_timestamp}).
+If the page is partially validated, this field how many \texttt{PTE} has been
+validated.
+We will not going deeper in the process of page type validation.

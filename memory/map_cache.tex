@@ -1,0 +1,182 @@
+\setalias{\map}{\texttt{map\_domain\_page()}\xspace}
+\setalias{\unmap}{\texttt{unmap\_domain\_page()}\xspace}
+\setalias{\ulong}{\texttt{unsigned long}\xspace}
+\setalias{\voidp}{\texttt{void *}\xspace}
+\setalias{\vcache}{\texttt{mapcache\_vcpu}\xspace}
+\setalias{\dcache}{\texttt{mapcache\_domain}\xspace}
+\setalias{\hashent}{\texttt{vcpu\_maphash\_entry}\xspace}
+\setalias{\inuse}{\texttt{inuse}\xspace}
+\setalias{\garbage}{\texttt{garbage}\xspace}
+
+\paragraph{}
+The map cache is the system designed to allow you accessing any page frame
+content.
+Because even in hypervisor mode, the current processor still use the domain
+specific page table, the map cache has to create a mapping between the page
+frame you want to access to and a virtual address.
+
+\paragraph{}
+This system is based on the two main functions: \map and \unmap.
+Their respectively take an \ulong, which represent the machine frame number,
+map it and give you back a \voidp, which represent the physical accessible
+address ; or take a previously returned \voidp and unmap it.
+It is possible to map the same mfn many times, a reference count is keeped
+inside the map cache, so it will stay mapped at the same physical address until
+it has been unmapped as many times it has been mapped\footnote{see below the
+limitations of the map cache reference counting}.
+
+\paragraph{}
+With this two core functions, there also is \texttt{clear\_domain\_page()}
+which clears the content of a given machine frame number and
+\texttt{copy\_domain\_page()} which copies the content of its second \ulong
+machine frame number argument into its first one.
+These two functions automatically map and unmap the given frame numbers.
+Another function \texttt{domain\_page\_map\_to\_mfn()} can be usefull to
+retrieve the machine frame number from a given physical address.
+
+\paragraph{}
+The mapping created by \map and \unmap are local to the current vcpu.
+More precisely, the physical addresses returned by \map can only be cached for
+the current vcpu, meaning if two vcpus map the same machine frame number many
+times, there will be two valid mappings, usable by every vcpus of the domain.
+Most of the time, it is what you want because the operations on machine frames
+are often local and this way avoid some unecessary sharing between vcpus.
+But sometimes, you want to map a machine frame number into a physical address
+intended to be used by several vcpus.
+That is the goal of the \texttt{map\_domain\_page\_global()} and
+\texttt{unmap\_domain\_page\_global()} functions which do the same thing than
+their local sisters but the physical addresses do not go throught the local
+cache system, instead their use another global mapping mechanism.
+
+\paragraph{}
+Now we have seen the interface provided by the map cache system, let us see the
+internals and the limitations of it.
+The main structures are described in the \texttt{xen/include/asm-x86/domain.h}
+header file and are named \dcache, \vcache and \hashent.
+In the first time, we will only see how the local mappings are performed.
+The global mapping will be described briefly because it is based on other
+mechanisms of xen.
+
+\paragraph{}
+The mapping is performed using the linear mapping tables which are tables of
+page table entries, belonging to the domain page table\footnote{I have not
+actually seen where, but it is very likely to be so}, and mapped on physical
+addresses, so their are directly accessible.
+That means changes written in these tables are directly seen by the MMU (if
+the TLB flushes are performed correctly).
+The structure \dcache is the one responsible to maintain the information of
+what is mapped where.
+It is mainly composed of two bitsets, each bit of these correspond to an entry
+in the linear tables.
+The first one is \inuse and tracks if a machine frame has been mapped on a
+given entry since the last TLB flush.
+The second one is \garbage and tracks what entry has been unmapped on the
+linear table but not yet flushed.
+The goal to have these to bitsets is to batch the TLB flushes since it is a
+very costly operation.
+
+\paragraph{}
+In addition of these bitsets, come the fields \texttt{entries} and
+\texttt{cursor} which indicate respectively the capacity of the bitsets (it is
+a constant field), and what is the next entry to search on to find a free slot.
+Please notice it does not mean the entrie is actually free, it is just a way
+to check the entries in a circular way instead of checking from the entry 0
+each time.
+The \dcache structure is depicted in figure \ref{figure dcache scheme}.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[start chain=1 going above, start chain=2 going right,
+      start chain=3 going right, start chain=4 going above, node distance=0]
+    \tikzstyle{dcache}=[draw,on chain=1, minimum width=2.3cm,
+      minimum height=.8cm]
+    \tikzstyle{bitset}=[draw,minimum width=.45cm,minimum height=.5cm]
+    \tikzstyle{inuse}=[bitset,on chain=2]
+    \tikzstyle{garbage}=[bitset,on chain=3]
+    \tikzstyle{linear}=[draw,on chain=4,minimum width=1.6cm,
+      minimum height=.4cm]
+    \def\z{\texttt{0}}
+    \def\o{\texttt{1}}
+
+    \node[dcache,anchor=south east] (garbage) at (0,.2) {\garbage};
+    \node[dcache] (inuse) {\inuse};
+    \node[dcache] (cursor) {\texttt{cursor}};
+    \node[dcache] (entries) {\texttt{entries}};
+    \node[anchor=north] at ($(garbage.south)+(0,-.3)$) {\dcache};
+
+    \node[garbage,anchor=south west] (garbage0) at (1,0) {\o};
+    \foreach \i in {1,2,3} \node[garbage] (garbage\i) {\z};
+    \foreach \i in {4,5,6,7} \node[garbage] (garbage\i) {\z};
+
+    \node[inuse,anchor=south west] (inuse0) at (1,1) {\o};
+    \foreach \i in {1,2,3} \node[inuse,fill=gray!30] (inuse\i) {\o};
+    \node[inuse] (inuse4) {\z};
+    \node[inuse] (inuse5) {\z};
+    \node[inuse,fill=gray!30] (inuse6) {\o};
+    \node[inuse] (inuse7) {\z};
+
+    \node[on chain=4,minimum height=1cm] at (7,-.6)
+         {\texttt{\_\_linear\_l1\_table}};
+    \node[linear] (linear7) {};
+    \node[linear,fill=gray!30] (linear6) {};
+    \foreach \i in {5,4} \node[linear] (linear\i) {};
+    \foreach \i in {3,2,1} \node[linear,fill=gray!30] (linear\i) {};
+    \node[linear] (linear0) {};
+
+    \draw[->] (inuse.east) -- (inuse0.west);
+    \draw[->] (garbage.east) -- (garbage0.west);
+
+    \draw[<->] ($(garbage5.south west)+(0,-.3)$) -- node[below] {bit}
+    ($(garbage5.south east)+(0,-.3)$);
+    \node (entrieswest) at ($(inuse0.north west)+(0,1)$) {};
+    \node (entrieseast) at ($(inuse7.north east)+(0,1)$) {};
+    \draw[<->] (entrieswest.center) -- node (entriescenter) {}
+    (entrieseast.center);
+    \draw[dashed,color=gray] (inuse0.north west) -- (entrieswest.center);
+    \draw[dashed,color=gray] (inuse7.north east) -- (entrieseast.center);
+    \draw[<->] ($(linear0.north west)+(-.2,0)$) --
+    node[left] {\texttt{l1\_pgentry\_t}} ($(linear0.south west)+(-.2,0)$);
+
+    \draw[->,rounded corners] (cursor.east) -| (inuse4.north);
+    \draw[rounded corners] (entries.east) -| (entriescenter.center);
+
+  \end{tikzpicture}
+  \caption{\label{figure dcache scheme}Representation of the \dcache with
+    the \inuse and \garbage bitsets.
+    Beside the linear mapping \texttt{\_\_linear\_l1\_table} with mapping slots
+    in gray.
+    These slots match the entries which are \texttt{1} in the \inuse bitset and
+    \texttt{0} in the \garbage one.}
+\end{figure}
+
+\paragraph{}
+When the \map function is called, the map cache system will:
+\begin{itemize}
+\item try to find a cache entry which already map it (we will see it later)
+\item if it cannot find one, it searches, starting from the cursor, an entry in
+  the \inuse bitset which is \texttt{0}
+\item if it reaches the end of the bitset without finding, it will trigger a
+  first ``garbage collection'', meaning all entries which have a \texttt{1}
+  in the \garbage bitset will be set to \texttt{0} in both bitsets, then
+  it reset the cursor and restart a search
+\item if the first collection does not free any entry, a second
+  ``garbage collection'' occurs and the map cache system try to evict a cache
+  entry (we will see it later) and steal its \inuse entry
+\item if the second collection does not find a cache entry which can be evicted
+  (because their all have a positive reference counter), Xen will crash
+\end{itemize}
+If a collection occurs, the map cache system will also perform a TLB flush so
+the MMU can know the garbage entries are not mapped anymore.
+When the map cache system has an entry, it sets the matching \inuse bit to
+\texttt{1} and set the cursor to the next entry.
+Then it writes the machine frame number in the appropriate slot of the linear
+table and return the physical address, which is simply a predefined physical
+address incremented by as many pages as the entry number.
+
+\paragraph{}
+When the \unmap function is called, the map cache system starts by computing
+the entry number, basing on the given physical address.
+With this entry, it can read into the linear table what is the corresponding
+machine frame number.
+With this last, it can check if there already is a cache entry for this machine
+frame number, if so, it just decrement the reference count.

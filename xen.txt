@@ -1,0 +1,265 @@
+Xen
+Gauthier Voron
+August 27, 2014
+
+2
+
+Chapter 1
+
+The Memory System
+1.0.1
+
+The page_info structure
+
+The page_info structure is the place to find an information about a machine
+page frame. For instance, this is where Xen stores the count of pointer on the
+page frame to avoid uncontrolled deallocation. You can access the page_info
+of a given page frame address (unsigned long) with the macro mfn_to_page()
+which takes the page frame address as an argument and brings you back a
+pointer on the good page_info. Of course, you can do the reverse operation
+with the macro page_to_mfn().
+You can find the definition of the page_info structure in the header file
+xen/include/asm-x86/mm.h. Because there can be a lot of page frames in a
+machine and so a lot of page_info, which have to always remain in memory,
+the size of this structure does matter. That is why, the bits in this structure
+are carefully used and have different significations depending on how the page
+frame is used.
+The first field is a double word indicating how the page frame is linked to
+the other ones. For most cases, the field to use is list which is the two “short
+pointers” on the previous and on the next page_info into a doubly linked list.
+It can be the free list the page frame belong to, or any page list of a domain1 .
+The other fields up and sharing are either for shadow paging, which is not used
+anymore, and page sharing, which is a corner case.
+The next field count_info is a double word reference counter. The principle
+is as usual, each page_info tracks the count of pointer on the corresponding
+page frame. When trying to deallocate a page frame, the reference count is
+checked, and if it is not 0, it should not be considered as free. Now because
+it is very unlike this counter reach big values, the highter bits of this counter
+1 not
+
+exhaustive
+
+3
+
+4
+
+CHAPTER 1. THE MEMORY SYSTEM
+63
+
+62
+
+61
+
+60
+
+59
+
+58
+
+57
+
+AL
+
+XH
+
+PT
+
+PA
+
+PC
+
+PW
+
+BR
+
+55
+ST
+
+0
+CNT
+
+Figure 1.1: Definition of page_info.count_info
+60
+TYPE
+
+59
+
+58
+
+57
+
+56
+
+55
+
+PI
+
+VA
+
+AE
+
+PA
+
+LK
+
+0
+CNT
+
+Figure 1.2: Definition of page_info.u.inuse.type_info
+are used to store other informations. These informations are described in figure
+1.1 and in table 1.1. This description stands for a x86_64 architecture. To be
+portable, you should use the macros listed in xen/include/asm-x86/mm.h and
+starting with PGC_.
+The next field is a double word with a meaning depending on the value
+of count_info. If this last is 0, then the related page frame is used as a
+shadow. Because it is a corner case, we leave this value. If count_info &
+PGC_count_mask (the mask for the counter field of count_info) is 0, then the
+page is not used and is in a free list, and the first 8-bit character of this field
+is a boolean which is set, means the TLB has to be flushed before the next
+use of the page frame (page_info.u.free.need_tlbflush). If count_info
+& PGC_count_mask is not 0, then the page is in use, and this field is another
+reference counter (page_info.u.inuse.type_info).
+This counter is another regular reference counter, but instead indicating the
+count of entities which have references to the page frame, it indicates the count
+of entities using the page frame with a specific meaning. For instance, a page
+frame can be used as a part of a page frame, or as a page writable by the
+guest. This count is keeped to ensure a page cannot change its type while
+being used. Once again, because this counter will not reach hight values, the
+hightest bits of this counter are used to store valuable informations. These
+informations are described in figure 1.2 and in table 1.2. This description stands
+for a x86_64 architecture. To be portable, you should use the macros listed in
+xen/include/asm-x86/mm.h and starting with PGT_.
+The next field is a single word with a meaning depending on the value of
+count_info. Again, because the shadow paging is a corner case, we will not
+describe it here. If the page is in a free list, the field indicates the order of the
+page: the consecutive pages which are in a free list are packed together to form
+power of two sized page frames (page_info.v.free.order). At allocation time,
+their can be taken as a big page frame, or be splitted to be used separatedely.
+
+5
+
+field
+AL
+XH
+
+PT
+
+PA
+
+PC
+
+PW
+
+BR
+
+ST
+
+CNT
+
+description
+Allocated bit. If this is set, then the corresponding page frame is
+already allocated to a domain. Obtained with PGC_allocated.
+Xen heap bit. If this is set, then the corresponding page frame is
+belonging to the xen heap of the owning domain, meaning it can be
+used for hypervisor operations but not from inside the VM2 . Obtained
+with PGC_xen_heap.
+Page table bit. If this is set, then the corresponding page frame is
+used as the page frame of the owning domain, and so it cannot be
+used from inside the VM. Obtained with PGC_page_table.
+Page attribute table bit. Indicate the state of PAT use for the corresponding page frame. Obtained with PGC_cacheattr_mask and
+PGC_cacheattr_base.
+Page cache disable bit. Indicate the state of PCD use for the corresponding page frame. Obtained with PGC_cacheattr_mask and
+PGC_cacheattr_base.
+Page write throught bit. Indicate the state of the PWT use for the
+corresponding page frame. Obtained with PGC_cacheattr_mask and
+PGC_cacheattr_base.
+Page broken bit. If this is set, then the page cannot be used anymore. Typically, it cannot be returned by a Xen allocation function.
+Obtained with PGC_broken.
+The state of the page. These two bits indicate the state of the page
+frame which can be inuse, offlining, offlined or free. Obtained
+with page_state_is().
+The reference counter of the page frame. These 55 bits indicate how
+many entities have a reference on the page frame. When the count
+falls to 0, the page can be freed. Obtained with PGC_count_mask.
+Table 1.1: Definition of page_info.count_info fields
+
+6
+
+CHAPTER 1. THE MEMORY SYSTEM
+
+field
+TYPE
+PI
+
+VA
+
+AE
+
+PA
+
+LK
+CNT
+
+description
+The type of the page. The possible types are listed in 1.3. Obtained
+with PGT_type_mask.
+Page pinned bit. If this is set, then the owning domain has pinned
+the corresponding page frame to its current type. Obtained with
+PGT_pinned.
+Page validated bit. If this is set, then the corresponding page
+frame has been validated to be of its current type. Obtained with
+PGT_validated.
+PAE xen private bit. If this is set, then the corresponding page is
+a L2 page (second level of page table) and contains mapping the
+guest cannot use. This can be used in PAE only. Obtained with
+PGT_pae_xen_l2.
+Partial validated bit. If this is set, then the corresponding page
+frame has been partially validated to be of its current type. Obtained with PGT_partial.
+Locked page bit. If this is set, then the corresponding page frame
+is locked. Obtained with PGT_locked.
+The reference counter of the page frame. These 55 bits indicate how
+many entities have a reference on the page frame as a typed page
+frame. When the count falls to 0, the page can change its type.
+Obtained with PGT_count_mask.
+Table 1.2: Definition of page_info.u.type_info fields
+
+type
+PGT_none
+PGT_l1_page_table
+PGT_l2_page_table
+PGT_l3_page_table
+PGT_l4_page_table
+PGT_seg_desc_page
+PGT_writable_page
+PGT_shared_page
+
+description
+This page has no type.
+This page is used as a first level page in the page table
+of the guest.
+This page is used as a second level page in the page
+table of the guest.
+This page is used as a third level page in the page
+table of the guest.
+This page is used as a fourth level page in the page
+table of the guest.
+This page is used a the GDT or LDT of the guest.
+This page is used directly by the guest, and is writable
+from inside of it.
+This page is a shared copy-on-write page.
+
+Table 1.3: Definition of page_info.u.type_info types
+
+7
+The value 0 of this field means a 4 Kilobytes page frame, then it increases in
+power of two. If the page is in use, the field indicates what domain is owning
+the page (page_info.v.inuse._domain). This field should not be used directly,
+instead, user should apply the macro page_get_owner() of page_set_owner()
+on the page_info.
+The last field is a single word with a meaning depending on several other
+fields. If the page is free or typeless, then it is a timestamp for the last TLB flush
+of this page frame (page_info.tlbflush_timestamp). If the page is partially
+validated, this field how many PTE has been validated. We will not going deeper
+in the process of page type validation.
+
+

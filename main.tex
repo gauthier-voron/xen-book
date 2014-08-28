@@ -1,0 +1,30 @@
+\documentclass{book}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{xspace}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\usepackage{tikz}
+
+\usetikzlibrary{chains,calc}
+
+\newcommand{\setalias}[2]{%
+  \ifx#1\undefined
+  \newcommand{#1}{#2}
+  \else
+  \renewcommand{#1}{#2}
+  \fi
+}
+
+\title{Xen}
+\date{\today}
+\author{Gauthier Voron}
+
+\begin{document}
+
+\maketitle
+
+\chapter{The Memory System}
+\input{memory/main}
+
+\end{document}
