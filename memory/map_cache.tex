@@ -150,20 +150,16 @@ The \dcache structure is depicted in figure \ref{figure dcache scheme}.
 \end{figure}
 
 \paragraph{}
-When the \map function is called, the map cache system will:
+When the \map function is called to map a machine page, the map cache system:
 \begin{itemize}
-\item try to find a cache entry which already map it (we will see it later)
-\item if it cannot find one, it searches, starting from the cursor, an entry in
-  the \inuse bitset which is \texttt{0}
+\item searches, starting from the cursor, an entry in the \inuse bitset which
+  is \texttt{0}
 \item if it reaches the end of the bitset without finding, it will trigger a
-  first ``garbage collection'', meaning all entries which have a \texttt{1}
+  ``garbage collection'', meaning all entries which have a \texttt{1}
   in the \garbage bitset will be set to \texttt{0} in both bitsets, then
   it reset the cursor and restart a search
-\item if the first collection does not free any entry, a second
-  ``garbage collection'' occurs and the map cache system try to evict a cache
-  entry (we will see it later) and steal its \inuse entry
-\item if the second collection does not find a cache entry which can be evicted
-  (because their all have a positive reference counter), Xen will crash
+\item if it does not find any entry which can be used after this
+  ``garbage collection'', Xen crashes
 \end{itemize}
 If a collection occurs, the map cache system will also perform a TLB flush so
 the MMU can know the garbage entries are not mapped anymore.
@@ -172,11 +168,189 @@ When the map cache system has an entry, it sets the matching \inuse bit to
 Then it writes the machine frame number in the appropriate slot of the linear
 table and return the physical address, which is simply a predefined physical
 address incremented by as many pages as the entry number.
+When the \unmap function is called, the map cache system starts by computing
+the entry number, basing on the given physical address, then it set the
+\garbage bit to \texttt{1}, meaning it can be flused for the next
+``collection''.
 
 \paragraph{}
-When the \unmap function is called, the map cache system starts by computing
-the entry number, basing on the given physical address.
-With this entry, it can read into the linear table what is the corresponding
+Now, as described here, this system could work, but it is often the same
+machine pages which need to be mapped (for instance, the page table pages
+theirselves), and it would be more efficient to reuse these mappings with a
+cache system.
+It is the goal of the two other structures: \vcache and \hashent.
+There is one \vcache structure per vcpu and a fixed amount of \hashent
+(eight in the current implementation) per \vcache.
+The state flow of an \hashent is depicted in \ref{figure hashent scheme}.
+
+\paragraph{}
+A \hashent structure is simply a container for three fields as described in
+table \ref{table vcpu_maphash_entry}.
+\begin{table}
+  \centering
+  \begin{tabularx}{\textwidth}{ | l | X | }
+    \hline
+    field   & description \\
+    \hline
+    \texttt{mfn}    & The machine frame number of the cached entry.
+                      When the \hashent is not used, this field is set to
+                      $\sim$\texttt{0}. \\
+    \hline
+    \texttt{idx}    & The physical entry of the cached page.
+                      When the \hashent is not used, this field is set to
+                      \texttt{MAPHASHENT\_NOTINUSE}. \\
+    \hline
+    \texttt{refcnt} & The amount of time this entry is currently mapped.
+                      When the \hashent is not used, this field is set to
+                      \texttt{0}. \\
+    \hline
+  \end{tabularx}
+  \caption{\label{table vcpu_maphash_entry}Definition of
+    \texttt{vcpu\_maphash\_entry} fields}
+\end{table}
+The \vcache is simply an array of \hashent.
+The hash function is a binary mask of the machine frame number to keep only the
+lowest bits.
+The main thing to remember about the actual cache of the map cache system is it
+work in the inverted way comparing to a hardware cache: an machine mapping can
+be cached when it is unmapped by the user.
+However, a cache entry can be evicted only when the user want to create a new
+machine mapping.
+
+\paragraph{}
+The caching mechanisms take place when the \map and the \unmap functions are
+called.
+At \unmap, as said above, the map cache starts by computing the entry number,
+basing on the given physical address.
+Then it can read in the mapping table (the one used by the MMU) to find the
 machine frame number.
-With this last, it can check if there already is a cache entry for this machine
-frame number, if so, it just decrement the reference count.
+It can apply the hash function on this last to find the corresponding cache
+entry.
+Now because this is a cache, the cache entry may already be used for another
+machine frame, so the map cache need to compare the \texttt{mfn} field of the
+entry with the previously found frame number.
+If it match, the \texttt{refcnt} field is decremented.
+
+\paragraph{}
+If the entry caches another mapping which can be evicted (its \texttt{refcnt}
+field is \texttt{0}), it is.
+Because the map entry stores the physical entry (\texttt{idx} field) of the
+replaced frame, the map cache can find the corresponding bit in \garbage and
+set it to \texttt{1}.
+It can also remove the mapping from the page table since the physical entry
+indicates the physical address of the page.
+Then the physical entry and machine frame fields of the cache entry are
+replaced.
+It is also possible the cache entry be empty, in this case the \texttt{idx} and
+\texttt{mfn} fields are also updated to match the newly unmapped frame.
+
+\paragraph{}
+If no entry can be found in these ways, the currently unmapped frame cannot be
+cached for the next time.
+The corresponding bit in \garbage is then set to \texttt{1} and the mapping is
+removed from the page table.
+
+\paragraph{}
+Now when the \map function is called, before to search a slot in \inuse, the
+map cache use the machine frame number to compute the index of the cache entry.
+As for the \unmap function, it then compare the \texttt{mfn} field to the
+current frame number.
+If their match, the \texttt{refcnt} field of the entry is incremented and the
+function returns immediately the physical address, since the page is already
+mapped.
+
+\paragraph{}
+If the entry does not match with the currently mapped frame, then the \map
+function goes back to the normal path.
+The map cache is then only checked when no entry can be found in the \inuse
+bitset and the first ``collection'' failed to free any slot.
+In this case, every cache entries are checked and the first one which can be
+evicted is.
+Because this operation takes place after the ``garbage collection'' but before
+the, now unavoidable, TLB flush, there is no need to use the \garbage bitset
+and the entry is just removed from the page table.
+
+\paragraph{}
+When a cache entry is evicted this way, its physical entry (\texttt{idx}) is
+used for the newly mapped machine frame.
+However, the entry is marked as not in use.
+This is because all cache entries are checked for eviction, and not only the
+one matching the machine frame number.
+If such an entry was marked as used, with a \texttt{refcnt} to \texttt{1}, it
+could never be decremented by the \unmap function.
+If no cache entry can be found in this way, the \map function goes back to its
+normal path and Xen crashes.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}
+    \def\ns{2.2cm}
+    \def\fs{1.3cm}
+    \def\hd{2}
+    \def\vd{1.2}
+
+    \node[draw,text width=\ns,minimum width=\ns] (unusedA) {
+      \makebox[\ns][c]{\bf unused}\\
+      \makebox[\fs][l]{\texttt{mfn}}\texttt{= }$\sim$\texttt{0}\\
+      \makebox[\fs][l]{\texttt{idx}}\texttt{= }$\emptyset$\\
+      \makebox[\fs][l]{\texttt{refcnt}}\texttt{= 0}
+    };
+
+    \node[draw,text width=\ns,minimum width=\ns,anchor=west] (cachedA)
+    at ($(unusedA.east)+(\hd,0)$) {
+      \makebox[\ns][c]{\bf cached}\\
+      \makebox[\fs][l]{\texttt{mfn}}\texttt{= }$\delta$\\
+      \makebox[\fs][l]{\texttt{idx}}\texttt{= }$\Delta$\\
+      \makebox[\fs][l]{\texttt{refcnt}}\texttt{= 0}
+    };
+
+    \node[draw,text width=\ns,minimum width=\ns,anchor=west] (usedA)
+    at ($(cachedA.east)+(\hd,0)$) {
+      \makebox[\ns][c]{\bf used}\\
+      \makebox[\fs][l]{\texttt{mfn}}\texttt{= }$\delta$\\
+      \makebox[\fs][l]{\texttt{idx}}\texttt{= }$\Delta$\\
+      \makebox[\fs][l]{\texttt{refcnt}}\texttt{> 0}
+    };
+
+    \node[draw,text width=\ns,minimum width=\ns,anchor=north] (cachedB)
+    at ($(cachedA.south)+(0,-\vd)$) {
+      \makebox[\ns][c]{\bf cached}\\
+      \makebox[\fs][l]{\texttt{mfn}}\texttt{= }$\omega$\\
+      \makebox[\fs][l]{\texttt{idx}}\texttt{= }$\Omega$\\
+      \makebox[\fs][l]{\texttt{refcnt}}\texttt{= 0}
+    };
+
+    \node[minimum width=\ns,minimum height=2cm,anchor=east] (unusedB) at
+    ($(cachedB.west)+(-\hd,0)$) {\bf \Large{\ldots}};
+    \node[minimum width=\ns,minimum height=2cm,anchor=west] (usedB) at
+    ($(cachedB.east)+(\hd,0)$) {\bf \Large{\ldots}};
+
+    \draw[->,>=stealth'] (unusedA) edge[bend left] node[above]
+         {\texttt{unmap(}$\Delta$\texttt{)}} (cachedA);
+    \draw[->,>=stealth'] (cachedA) edge[bend left] node[above]
+         {\texttt{map(}$\epsilon$\texttt{)}} (unusedA);
+
+    \draw[->,>=stealth'] (cachedA) edge[bend left] node[above]
+         {\texttt{map(}$\delta$\texttt{)}} (usedA);
+    \draw[->,>=stealth'] (usedA) edge[bend left] node[above]
+         {\texttt{unmap(}$\Delta$\texttt{)}} (cachedA);
+
+    \draw[->,>=stealth'] (cachedA) edge[bend right] node[left]
+         {\texttt{unmap(}$\Omega$\texttt{)}} (cachedB);
+    \draw[->,>=stealth'] (cachedB) edge[bend right] node[right]
+         {\texttt{unmap(}$\Delta$\texttt{)}} (cachedA);
+
+    \draw[->,>=stealth'] (unusedB) edge[bend left] (cachedB);
+    \draw[->,>=stealth'] (cachedB) edge[bend left] (unusedB);
+
+    \draw[->,>=stealth'] (cachedB) edge[bend left] (usedB);
+    \draw[->,>=stealth'] (usedB) edge[bend left] (cachedB);
+
+    \draw[->,>=stealth'] ($(unusedA.north)+(-1,.5)$) -- (unusedA);
+
+  \end{tikzpicture}
+  \caption{\label{figure hashent scheme}State flow for a single \hashent
+    cache entry structure.
+    The machine frame numbers are mapped here are with the H function
+    with H$(\delta) =$ H$(\omega) \neq$ H$(\epsilon)$.}
+\end{figure}
